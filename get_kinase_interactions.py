@@ -1,5 +1,6 @@
 import os
 import json
+import numpy
 import pickle
 import pandas
 from indra.statements import stmts_to_json
@@ -39,6 +40,15 @@ def export_json(statements, fname):
         json.dump(stmts_json, fh, indent=1)
 
 
+def print_statistics(statements):
+    counts = sorted([(k, len(s)) for k, s in statements.items()],
+                    key=lambda x: x[1], reverse=True)
+    raw_counts = [c[1] for c in counts]
+    missing = [c[0] for c in counts if c[1] == 0]
+    print(f'No statements for kinases: {", ".join(missing)}')
+    print(f'{counts[0][1]} statements for the top kinase {counts[0][0]}')
+    print(f'{numpy.mean(raw_counts)} statements on average per kinase')
+
 if __name__ == '__main__':
     prefix = 'dark_kinase_statements'
     fname = 'Table_005_IDG_dark_kinome.csv'
@@ -58,3 +68,5 @@ if __name__ == '__main__':
     # Export into JSON and TSV
     export_json(stmts, f'{prefix}.json')
     export_tsv(stmts, f'{prefix}.tsv')
+
+    print_statistics(stmts)
