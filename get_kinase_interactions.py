@@ -4,7 +4,7 @@ import numpy
 import pickle
 import pandas
 from indra.statements import stmts_to_json
-from indra.assemblers import TsvAssembler
+from indra.assemblers.tsv import TsvAssembler
 from indra.db.client import get_primary_db, get_statements_by_gene_role_type
 
 
