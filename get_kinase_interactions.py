@@ -49,14 +49,12 @@ def print_statistics(statements):
     print(f'{counts[0][1]} statements for the top kinase {counts[0][0]}')
     print(f'{numpy.mean(raw_counts)} statements on average per kinase')
 
-if __name__ == '__main__':
-    prefix = 'dark_kinase_statements'
-    fname = 'Table_005_IDG_dark_kinome.csv'
 
+def make_all_kinase_statements(fname, prefix, col_name):
     # If we have a pickle just reuse that
     if not os.path.exists(f'{prefix}.pkl'):
         df = pandas.read_table(fname, sep=',')
-        kinases = list(df['gene_symbol'])
+        kinases = list(df[col_name])
         # Get all statements for kinases
         stmts = get_kinase_statements(kinases)
         with open(f'{prefix}.pkl' % prefix, 'wb') as fh:
@@ -64,9 +62,23 @@ if __name__ == '__main__':
     else:
         with open(f'{prefix}.pkl', 'rb') as fh:
             stmts = pickle.load(fh)
-
     # Export into JSON and TSV
     export_json(stmts, f'{prefix}.json')
     export_tsv(stmts, f'{prefix}.tsv')
 
     print_statistics(stmts)
+    return stmts
+
+
+if __name__ == '__main__':
+    # Get all dark kinase Statements
+    fname = 'Table_005_IDG_dark_kinome.csv'
+    prefix = 'dark_kinase_statements'
+    col_name = 'gene_symbol'
+    make_all_kinase_statements(fname, prefix, col_name)
+
+    # Get all kinase Statements
+    fname = 'Table_001_all_kinases.csv'
+    prefix = 'all_kinase_statements'
+    col_name = 'gene_symbol'
+    make_all_kinase_statements(fname, prefix, col_name)
