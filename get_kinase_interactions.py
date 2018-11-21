@@ -5,7 +5,8 @@ import pickle
 import pandas
 from indra.statements import stmts_to_json
 from indra.assemblers.tsv import TsvAssembler
-from indra.db.client import get_primary_db, get_statements_by_gene_role_type
+from indra.tools import assemble_corpus as ac
+from indra_db.client import get_primary_db, get_statements_by_gene_role_type
 
 
 def get_kinase_statements(kinases):
@@ -57,7 +58,10 @@ def make_all_kinase_statements(fname, prefix, col_name):
         kinases = list(df[col_name])
         # Get all statements for kinases
         stmts = get_kinase_statements(kinases)
-        with open(f'{prefix}.pkl' % prefix, 'wb') as fh:
+        with open(f'{prefix}_before_assembly.pkl', 'wb') as fh:
+            pickle.dump(stmts, fh)
+        stmts = assemble_statements(stmts)
+        with open(f'{prefix}.pkl', 'wb') as fh:
             pickle.dump(stmts, fh)
     else:
         with open(f'{prefix}.pkl', 'rb') as fh:
@@ -70,15 +74,21 @@ def make_all_kinase_statements(fname, prefix, col_name):
     return stmts
 
 
+def assemble_statements(stmts):
+    for kinase, kinase_stmts in stmts.items():
+        stmts[kinase] = ac.filter_human_only(kinase_stmts)
+    return stmts
+
+
 if __name__ == '__main__':
     # Get all dark kinase Statements
     fname = 'Table_005_IDG_dark_kinome.csv'
-    prefix = 'dark_kinase_statements'
+    prefix = 'dark_kinase_statements_v2'
     col_name = 'gene_symbol'
     make_all_kinase_statements(fname, prefix, col_name)
 
     # Get all kinase Statements
-    fname = 'Table_001_all_kinases.csv'
-    prefix = 'all_kinase_statements'
-    col_name = 'gene_symbol'
-    make_all_kinase_statements(fname, prefix, col_name)
+    #fname = 'Table_001_all_kinases.csv'
+    #prefix = 'all_kinase_statements'
+    #col_name = 'gene_symbol'
+    #make_all_kinase_statements(fname, prefix, col_name)
