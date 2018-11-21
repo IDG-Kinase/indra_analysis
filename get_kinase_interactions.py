@@ -1,10 +1,12 @@
 import os
 import json
 import numpy
+import boto3
 import pickle
 import pandas
 from indra.statements import stmts_to_json
 from indra.assemblers.tsv import TsvAssembler
+from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
 from indra_db.client import get_primary_db, get_statements_by_gene_role_type
 
@@ -69,15 +71,31 @@ def make_all_kinase_statements(fname, prefix, col_name):
     # Export into JSON and TSV
     export_json(stmts, f'{prefix}.json')
     export_tsv(stmts, f'{prefix}.tsv')
+    dump_to_s3(stmts)
 
     print_statistics(stmts)
     return stmts
 
 
 def assemble_statements(stmts):
+    """Run assembly steps on statements."""
     for kinase, kinase_stmts in stmts.items():
         stmts[kinase] = ac.filter_human_only(kinase_stmts)
     return stmts
+
+
+def dump_to_s3(stmts):
+    s3 = boto3.client('s3')
+    bucket = 'dark-kinases'
+    for kinase, sts in stmts.items():
+        fname = f'{kinase}.html'
+        sts_sorted = sorted(sts, key=lambda x: len(x.evidence), reverse=True)
+        ha = HtmlAssembler(sts_sorted)
+        html_str = ha.make_model()
+        url = 'https://s3.amazonaws.com/%s/%s' % (bucket, fname)
+        print('Dumping to %s' % url)
+        s3.put_object(Key=fname, Body=html_str.encode('utf-8'), Bucket=bucket,
+                      ContentType='text/html')
 
 
 if __name__ == '__main__':
