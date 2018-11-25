@@ -8,16 +8,16 @@ from indra.statements import stmts_to_json
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
-from indra_db.client import get_primary_db, get_statements_by_gene_role_type
+from indra.belief import BeliefEngine
+from indra.sources.indra_db_rest import get_statements
 
 
 def get_kinase_statements(kinases):
     """Get all statements from the database for a list of gene symbols."""
     all_statements = {}
-    db = get_primary_db()
     for kinase in kinases:
-        statements = get_statements_by_gene_role_type(kinase, db=db,
-                                                      with_support=False)
+        statements = get_statements(agents=[kinase], ev_limit=10000,
+                                    best_first=False)
         all_statements[kinase] = statements
     return all_statements
 
@@ -79,8 +79,10 @@ def make_all_kinase_statements(fname, prefix, col_name):
 
 def assemble_statements(stmts):
     """Run assembly steps on statements."""
+    be = BeliefEngine()
     for kinase, kinase_stmts in stmts.items():
         stmts[kinase] = ac.filter_human_only(kinase_stmts)
+        be.set_prior_probs(stmts[kinase])
     return stmts
 
 
@@ -101,7 +103,7 @@ def dump_to_s3(stmts):
 if __name__ == '__main__':
     # Get all dark kinase Statements
     fname = 'Table_005_IDG_dark_kinome.csv'
-    prefix = 'dark_kinase_statements_v2'
+    prefix = 'dark_kinase_statements_v3'
     col_name = 'gene_symbol'
     make_all_kinase_statements(fname, prefix, col_name)
 
