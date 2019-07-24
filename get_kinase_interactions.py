@@ -16,10 +16,25 @@ def get_kinase_statements(kinases):
     """Get all statements from the database for a list of gene symbols."""
     all_statements = {}
     for kinase in kinases:
-        statements = get_statements(agents=[kinase], ev_limit=10000,
-                                    best_first=False)
-        all_statements[kinase] = statements
+        idbp = get_statements(agents=[kinase], ev_limit=10000,
+                              best_first=False)
+        stmts = filter_out_medscan(idbp.statements)
+        all_statements[kinase] = stmts
     return all_statements
+
+
+def filter_out_medscan(stmts):
+    new_stmts = []
+    for stmt in stmts:
+        new_evidence = []
+        for ev in stmt.evidence:
+            if ev.source_api == 'medscan':
+                continue
+            new_evidence.append(ev)
+        if not new_evidence:
+            continue
+        new_stmts.append(stmt)
+    return new_stmts
 
 
 def export_tsv(statements, fname):
@@ -69,8 +84,8 @@ def make_all_kinase_statements(fname, prefix, col_name):
         with open(f'{prefix}.pkl', 'rb') as fh:
             stmts = pickle.load(fh)
     # Export into JSON and TSV
-    export_json(stmts, f'{prefix}.json')
-    export_tsv(stmts, f'{prefix}.tsv')
+    #export_json(stmts, f'{prefix}.json')
+    #export_tsv(stmts, f'{prefix}.tsv')
     dump_to_s3(stmts)
 
     print_statistics(stmts)
@@ -103,7 +118,7 @@ def dump_to_s3(stmts):
 if __name__ == '__main__':
     # Get all dark kinase Statements
     fname = 'Table_005_IDG_dark_kinome.csv'
-    prefix = 'dark_kinase_statements_v3'
+    prefix = 'dark_kinase_statements_v4'
     col_name = 'gene_symbol'
     make_all_kinase_statements(fname, prefix, col_name)
 
