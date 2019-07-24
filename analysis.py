@@ -31,11 +31,13 @@ def get_raw_strings(all_stmts):
         if not hgnc_id:
             continue
         for stmt in stmts:
-            for agent in stmt.agent_list():
+            for idx, agent in enumerate(stmt.agent_list()):
                 if agent is not None and agent.db_refs.get('HGNC') == hgnc_id:
-                    text = agent.db_refs.get('TEXT')
-                    if text:
-                        raw_strings[kinase].append(text)
+                    for ev in stmt.evidence:
+                        agents = ev.annotations['agents']
+                        text = agents['raw_text'][idx]
+                        if text:
+                            raw_strings[kinase].append(text)
     return raw_strings
 
 
