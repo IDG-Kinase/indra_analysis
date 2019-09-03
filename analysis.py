@@ -43,7 +43,7 @@ def get_raw_strings(all_stmts):
 
 if __name__ == '__main__':
     all_stmts = load_stmts(prefix)
-    '''
+
     stmt_counts = []
     pmid_counts = []
     for kinase, stmts in all_stmts.items():
@@ -51,5 +51,4 @@ if __name__ == '__main__':
         pmid_counts.append(len(pmids))
         stmt_counts.append(len(stmts))
         print('%s: %d PMIDs, %d stmts' % (kinase, len(pmids), len(stmts)))
-    '''
     raw_strings = get_raw_strings(all_stmts)

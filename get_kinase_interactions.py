@@ -12,18 +12,26 @@ from indra.belief import BeliefEngine
 from indra.sources.indra_db_rest import get_statements
 
 
-def get_kinase_statements(kinases):
+def get_kinase_statements(kinases, ev_limit):
     """Get all statements from the database for a list of gene symbols."""
     all_statements = {}
     for kinase in kinases:
-        idbp = get_statements(agents=[kinase], ev_limit=10000,
+        idbp = get_statements(agents=[kinase], ev_limit=ev_limit,
                               best_first=False)
-        stmts = filter_out_medscan(idbp.statements)
+        source_counts = idbp.get_source_counts()
+        print('%s: %d' % (kinase, non_medscan_evidence(stmt, source_counts)))
+        stmts = filter_out_medscan(idbp.statements, source_counts)
         all_statements[kinase] = stmts
     return all_statements
 
 
-def filter_out_medscan(stmts):
+def non_medscan_evidence(stmt, source_counts):
+    counts = source_counts.get(stmt.get_hash())
+    ev_count = sum(c for k, c in counts.items() if k != 'medscan')
+    return ev_count
+
+
+def filter_out_medscan(stmts, source_counts):
     new_stmts = []
     for stmt in stmts:
         new_evidence = []
@@ -31,7 +39,7 @@ def filter_out_medscan(stmts):
             if ev.source_api == 'medscan':
                 continue
             new_evidence.append(ev)
-        if not new_evidence:
+        if not non_medscan_evidence(stmt, source_counts):
             continue
         new_stmts.append(stmt)
     return new_stmts
@@ -68,13 +76,13 @@ def print_statistics(statements):
     print(f'{numpy.mean(raw_counts)} statements on average per kinase')
 
 
-def make_all_kinase_statements(fname, prefix, col_name):
+def make_all_kinase_statements(fname, prefix, col_name, ev_limit):
     # If we have a pickle just reuse that
     if not os.path.exists(f'{prefix}.pkl'):
         df = pandas.read_table(fname, sep=',')
         kinases = list(df[col_name])
         # Get all statements for kinases
-        stmts = get_kinase_statements(kinases)
+        stmts = get_kinase_statements(kinases, ev_limit)
         with open(f'{prefix}_before_assembly.pkl', 'wb') as fh:
             pickle.dump(stmts, fh)
         stmts = assemble_statements(stmts)
@@ -117,13 +125,13 @@ def dump_to_s3(stmts):
 
 if __name__ == '__main__':
     # Get all dark kinase Statements
-    fname = 'Table_005_IDG_dark_kinome.csv'
-    prefix = 'dark_kinase_statements_v4'
-    col_name = 'gene_symbol'
-    make_all_kinase_statements(fname, prefix, col_name)
+    #fname = 'Table_005_IDG_dark_kinome.csv'
+    #prefix = 'dark_kinase_statements_v4'
+    #col_name = 'gene_symbol'
+    #make_all_kinase_statements(fname, prefix, col_name, ev_limit=10000)
 
     # Get all kinase Statements
-    #fname = 'Table_001_all_kinases.csv'
-    #prefix = 'all_kinase_statements'
-    #col_name = 'gene_symbol'
-    #make_all_kinase_statements(fname, prefix, col_name)
+    fname = 'Table_001_all_kinases.csv'
+    prefix = 'all_kinase_statements'
+    col_name = 'gene_symbol'
+    make_all_kinase_statements(fname, prefix, col_name, ev_limit=1)
