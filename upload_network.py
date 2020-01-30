@@ -2,7 +2,7 @@ import sys
 import pickle
 from indra.databases import ndex_client
 from indra.assemblers.cx import CxAssembler
-from indra.assemblers.cx.semantic_hub import add_semantic_hub_layout
+from indra.assemblers.cx.hub_layout import add_semantic_hub_layout
 
 
 if __name__ == '__main__':
