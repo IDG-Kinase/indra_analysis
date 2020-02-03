@@ -88,7 +88,7 @@ def make_all_kinase_statements(fname, prefix, col_name):
         df = pandas.read_table(fname, sep=',')
         kinases = list(df[col_name])
         # Get all statements for kinases
-        stmts = get_kinase_statements(kinases[:5])
+        stmts = get_kinase_statements(kinases)
         with open(f'{prefix}_before_assembly.pkl', 'wb') as fh:
             pickle.dump(stmts, fh)
         stmts = assemble_statements(stmts)
@@ -137,7 +137,7 @@ if __name__ == '__main__':
     #make_all_kinase_statements(fname, prefix, col_name, ev_limit=10000)
 
     # Get all kinase Statements
-    fname = 'Table_001_all_kinases.csv'
+    fname = 'allsources_HMS_it3_cleaned_manual.csv'
     prefix = 'all_kinase_statements_v6'
-    col_name = 'gene_symbol'
+    col_name = 'HGNC_name'
     make_all_kinase_statements(fname, prefix, col_name)
