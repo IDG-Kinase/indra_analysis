@@ -4,34 +4,40 @@ import numpy
 import boto3
 import pickle
 import pandas
+import logging
 from indra.statements import stmts_to_json
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
 from indra.belief import BeliefEngine
-from indra.sources.indra_db_rest import get_statements
+from indra.databases import hgnc_client
+#from indra.sources.indra_db_rest import get_statements
+from indra_db.client import get_statements_by_gene_role_type
 
 
-def get_kinase_statements(kinases, ev_limit):
+logger = logging.getLogger('get_kinase_interactions')
+
+
+def get_kinase_statements(kinases):
     """Get all statements from the database for a list of gene symbols."""
     all_statements = {}
     for kinase in kinases:
-        idbp = get_statements(agents=[kinase], ev_limit=ev_limit,
-                              best_first=False)
-        source_counts = idbp.get_source_counts()
-        print('%s: %d' % (kinase, non_medscan_evidence(stmt, source_counts)))
-        stmts = filter_out_medscan(idbp.statements, source_counts)
+        logger.info('Getting statements for %s' % kinase)
+        hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
+        if hgnc_id is None:
+            logger.warning('Could not get HGNC ID for %s' % kinase)
+            continue
+        stmts = get_statements_by_gene_role_type(agent_id=hgnc_id,
+                                                 agent_ns='HGNC',
+                                                 with_support=False)
+        stmts = filter_out_medscan(stmts)
+        stmts = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
         all_statements[kinase] = stmts
     return all_statements
 
 
-def non_medscan_evidence(stmt, source_counts):
-    counts = source_counts.get(stmt.get_hash())
-    ev_count = sum(c for k, c in counts.items() if k != 'medscan')
-    return ev_count
-
-
-def filter_out_medscan(stmts, source_counts):
+def filter_out_medscan(stmts):
+    logger.info('Starting medscan filter with %d statements' % len(stmts))
     new_stmts = []
     for stmt in stmts:
         new_evidence = []
@@ -39,9 +45,9 @@ def filter_out_medscan(stmts, source_counts):
             if ev.source_api == 'medscan':
                 continue
             new_evidence.append(ev)
-        if not non_medscan_evidence(stmt, source_counts):
-            continue
-        new_stmts.append(stmt)
+        if new_evidence:
+            new_stmts.append(stmt)
+    logger.info('Finished medscan filter with %d statements' % len(new_stmts))
     return new_stmts
 
 
@@ -76,13 +82,13 @@ def print_statistics(statements):
     print(f'{numpy.mean(raw_counts)} statements on average per kinase')
 
 
-def make_all_kinase_statements(fname, prefix, col_name, ev_limit):
+def make_all_kinase_statements(fname, prefix, col_name):
     # If we have a pickle just reuse that
     if not os.path.exists(f'{prefix}.pkl'):
         df = pandas.read_table(fname, sep=',')
         kinases = list(df[col_name])
         # Get all statements for kinases
-        stmts = get_kinase_statements(kinases, ev_limit)
+        stmts = get_kinase_statements(kinases)
         with open(f'{prefix}_before_assembly.pkl', 'wb') as fh:
             pickle.dump(stmts, fh)
         stmts = assemble_statements(stmts)
@@ -94,7 +100,7 @@ def make_all_kinase_statements(fname, prefix, col_name, ev_limit):
     # Export into JSON and TSV
     #export_json(stmts, f'{prefix}.json')
     #export_tsv(stmts, f'{prefix}.tsv')
-    dump_to_s3(stmts)
+    #dump_to_s3(stmts)
 
     print_statistics(stmts)
     return stmts
@@ -131,7 +137,7 @@ if __name__ == '__main__':
     #make_all_kinase_statements(fname, prefix, col_name, ev_limit=10000)
 
     # Get all kinase Statements
-    fname = 'Table_001_all_kinases.csv'
-    prefix = 'all_kinase_statements'
-    col_name = 'gene_symbol'
-    make_all_kinase_statements(fname, prefix, col_name, ev_limit=1)
+    fname = 'allsources_HMS_it3_cleaned_manual.csv'
+    prefix = 'all_kinase_statements_v6'
+    col_name = 'HGNC_name'
+    make_all_kinase_statements(fname, prefix, col_name)
