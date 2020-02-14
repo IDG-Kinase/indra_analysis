@@ -1,8 +1,9 @@
 import os
 import json
 import pickle
-from collections import Counter
+import itertools
 import matplotlib.pyplot as plt
+from collections import Counter, defaultdict
 from indra.statements import *
 
 
@@ -13,8 +14,7 @@ else:
     with open('all_kinase_statements_v6_patched.pkl', 'rb') as fh:
         stmts_dict = pickle.load(fh)
 
-
-    sources = []
+    sources = defaultdict(list)
     for kinase, stmts in stmts_dict.items():
         for stmt in stmts:
             if isinstance(stmt, Modification) and stmt.enz is None:
@@ -23,12 +23,13 @@ else:
                 source = ev.source_api
                 if ev.source_api == 'biopax':
                     source = 'biopax:%s' % ev.annotations['source_sub_id']
-                sources.append(source)
+                sources[kinase].append(source)
 
     with open('sources.json', 'w') as fh:
         json.dump(sources, fh, indent=1)
 
-cnt = Counter(sources)
+sources_flat = list(itertools.chain(*sources.values()))
+cnt = Counter(sources_flat)
 source_order, source_counts = zip(*cnt.most_common())
 
 readers = ['reach', 'sparser', 'medscan', 'rlimsp', 'trips', 'isi']
@@ -59,12 +60,34 @@ labels = {
     'biogrid': 'BioGRID'
     }
 
-labeled_sources = [labels[s] for s in source_order]
-source_colors = ['red' if s in readers else 'blue' for s in source_order]
-plt.figure()
-plt.bar(labeled_sources, source_counts, color=source_colors)
-plt.xticks(range(len(labeled_sources)), rotation='vertical')
-plt.yscale('log')
-plt.ylabel('Number of INDRA Statement evidences')
-plt.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.24)
-plt.show()
+
+def plot_source_counts():
+    labeled_sources = [labels[s] for s in source_order]
+    source_colors = ['red' if s in readers else 'blue' for s in source_order]
+    plt.figure()
+    plt.bar(labeled_sources, source_counts, color=source_colors)
+    plt.xticks(range(len(labeled_sources)), rotation='vertical')
+    plt.yscale('log')
+    plt.ylabel('Number of INDRA Statement evidences')
+    plt.subplots_adjust(left=0.08, right=0.98, top=0.95, bottom=0.24)
+    plt.show()
+
+
+def plot_db_vs_reader_stats():
+    proportions = {}
+    for kinase, kinase_sources in sources.items():
+        source_types = Counter(['reader' if s in readers else 'db' for s
+                                in kinase_sources])
+        proportions[kinase] = (source_types['db'] / sum(source_types.values()))
+    proportions = sorted(proportions.items(), key=lambda x: x[1],
+                         reverse=True)
+    print(proportions)
+    plt.figure()
+    plt.bar(range(len(proportions)), [p[1] for p in proportions])
+    plt.xlabel('Kinases')
+    plt.ylabel('Fraction of evidence from pathway databases')
+    plt.show()
+
+
+if __name__ == '__main__':
+    plot_db_vs_reader_stats()
