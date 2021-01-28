@@ -11,27 +11,52 @@ from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
 from indra.belief import BeliefEngine
 from indra.databases import hgnc_client
-#from indra.sources.indra_db_rest import get_statements
-from indra_db.client import get_statements_by_gene_role_type
+from indra.sources.indra_db_rest import get_statements
+from indra_db.client.statements import get_statements_by_gene_role_type
 
 
 logger = logging.getLogger('get_kinase_interactions')
 
 
-def get_kinase_statements(kinases):
+def get_statements_for_kinase_db_direct(kinase):
+    logger.info('Getting statements for %s' % kinase)
+    hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
+    if hgnc_id is None:
+        logger.warning('Could not get HGNC ID for %s' % kinase)
+        return None
+    stmts = get_statements_by_gene_role_type(agent_id=hgnc_id,
+                                             agent_ns='HGNC',
+                                             with_support=False)
+    stmts = filter_out_medscan(stmts)
+    stmts = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
+    return stmts
+
+
+def get_statements_for_kinase_db_api(kinase):
+    logger.info('Getting statements for %s' % kinase)
+    hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
+    if hgnc_id is None:
+        logger.warning('Could not get HGNC ID for %s' % kinase)
+        return None
+    ip = get_statements(agents=['%s@HGNC' % hgnc_id],
+                        ev_limit=10000)
+    stmts = filter_out_medscan(ip.statements)
+    stmts = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
+    return stmts
+
+
+def get_kinase_statements(kinases, db_mode='api'):
     """Get all statements from the database for a list of gene symbols."""
     all_statements = {}
     for kinase in kinases:
-        logger.info('Getting statements for %s' % kinase)
-        hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
-        if hgnc_id is None:
-            logger.warning('Could not get HGNC ID for %s' % kinase)
+        if db_mode == 'direct':
+            stmts = get_statements_for_kinase_db_direct(kinase)
+        elif db_mode == 'api':
+            stmts = get_statements_for_kinase_db_api(kinase)
+        else:
+            raise ValueError('Invalid DB mode: %s' % db_mode)
+        if stmts is None:
             continue
-        stmts = get_statements_by_gene_role_type(agent_id=hgnc_id,
-                                                 agent_ns='HGNC',
-                                                 with_support=False)
-        stmts = filter_out_medscan(stmts)
-        stmts = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
         all_statements[kinase] = stmts
     return all_statements
 
@@ -82,25 +107,36 @@ def print_statistics(statements):
     print(f'{numpy.mean(raw_counts)} statements on average per kinase')
 
 
-def make_all_kinase_statements(fname, prefix, col_name):
-    # If we have a pickle just reuse that
-    if not os.path.exists(f'{prefix}.pkl'):
-        df = pandas.read_table(fname, sep=',')
-        kinases = list(df[col_name])
-        # Get all statements for kinases
-        stmts = get_kinase_statements(kinases)
-        with open(f'{prefix}_before_assembly.pkl', 'wb') as fh:
-            pickle.dump(stmts, fh)
-        stmts = assemble_statements(stmts)
-        with open(f'{prefix}.pkl', 'wb') as fh:
-            pickle.dump(stmts, fh)
-    else:
-        with open(f'{prefix}.pkl', 'rb') as fh:
+def make_all_kinase_statements(fname, prefix, col_name, db_mode,
+                               exports=None):
+    before_assembly_pickle = f'{prefix}_before_assembly.pkl'
+    after_assembly_pickle = f'{prefix}.pkl'
+    if os.path.exists(after_assembly_pickle):
+        with open(after_assembly_pickle, 'rb') as fh:
             stmts = pickle.load(fh)
+    else:
+        if os.path.exists(before_assembly_pickle):
+            with open(before_assembly_pickle, 'rb') as fh:
+                stmts = pickle.load(fh)
+        else:
+            df = pandas.read_table(fname, sep=',')
+            kinases = list(df[col_name])
+            # Get all statements for kinases
+            stmts = get_kinase_statements(kinases, db_mode=db_mode)
+            with open(before_assembly_pickle, 'wb') as fh:
+                pickle.dump(stmts, fh)
+        stmts = assemble_statements(stmts)
+        with open(after_assembly_pickle, 'wb') as fh:
+            pickle.dump(stmts, fh)
+
     # Export into JSON and TSV
-    #export_json(stmts, f'{prefix}.json')
-    #export_tsv(stmts, f'{prefix}.tsv')
-    #dump_to_s3(stmts)
+    exports = exports if exports else set()
+    if 'json' in exports:
+        export_json(stmts, f'{prefix}.json')
+    if 'tsv' in exports:
+        export_tsv(stmts, f'{prefix}.tsv')
+    if 's3' in exports:
+        dump_html_to_s3(stmts)
 
     print_statistics(stmts)
     return stmts
@@ -115,7 +151,7 @@ def assemble_statements(stmts):
     return stmts
 
 
-def dump_to_s3(stmts):
+def dump_html_to_s3(stmts):
     s3 = boto3.client('s3')
     bucket = 'dark-kinases'
     for kinase, sts in stmts.items():
@@ -138,6 +174,8 @@ if __name__ == '__main__':
 
     # Get all kinase Statements
     fname = 'allsources_HMS_it3_cleaned_manual.csv'
-    prefix = 'all_kinase_statements_v6'
+    prefix = 'all_kinase_statements_v7'
     col_name = 'HGNC_name'
-    make_all_kinase_statements(fname, prefix, col_name)
+    db_mode = 'api'
+    stmts = make_all_kinase_statements(fname, prefix, col_name, db_mode=db_mode,
+                                       exports={'s3'})
