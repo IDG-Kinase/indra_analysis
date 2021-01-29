@@ -107,8 +107,7 @@ def print_statistics(statements):
     print(f'{numpy.mean(raw_counts)} statements on average per kinase')
 
 
-def make_all_kinase_statements(fname, prefix, col_name, db_mode,
-                               exports=None):
+def make_all_kinase_statements(kinases, prefix, db_mode, exports=None):
     before_assembly_pickle = f'{prefix}_before_assembly.pkl'
     after_assembly_pickle = f'{prefix}.pkl'
     if os.path.exists(after_assembly_pickle):
@@ -119,8 +118,6 @@ def make_all_kinase_statements(fname, prefix, col_name, db_mode,
             with open(before_assembly_pickle, 'rb') as fh:
                 stmts = pickle.load(fh)
         else:
-            df = pandas.read_table(fname, sep=',')
-            kinases = list(df[col_name])
             # Get all statements for kinases
             stmts = get_kinase_statements(kinases, db_mode=db_mode)
             with open(before_assembly_pickle, 'wb') as fh:
@@ -140,6 +137,12 @@ def make_all_kinase_statements(fname, prefix, col_name, db_mode,
 
     print_statistics(stmts)
     return stmts
+
+
+def get_kinase_list(fname, col_name):
+    df = pandas.read_table(fname, sep=',')
+    kinases = sorted(set(df[col_name]))
+    return kinases
 
 
 def assemble_statements(stmts):
@@ -173,9 +176,11 @@ if __name__ == '__main__':
     #make_all_kinase_statements(fname, prefix, col_name, ev_limit=10000)
 
     # Get all kinase Statements
+    # There are 722 kinases but only 709 unique here
     fname = 'allsources_HMS_it3_cleaned_manual.csv'
     prefix = 'all_kinase_statements_v7'
     col_name = 'HGNC_name'
     db_mode = 'api'
-    stmts = make_all_kinase_statements(fname, prefix, col_name, db_mode=db_mode,
+    kinases = get_kinase_list(fname, col_name)
+    stmts = make_all_kinase_statements(kinases, prefix, db_mode=db_mode,
                                        exports={'s3'})
