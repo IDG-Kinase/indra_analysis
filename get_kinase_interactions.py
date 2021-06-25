@@ -1,5 +1,6 @@
 import os
 import json
+import tqdm
 import numpy
 import boto3
 import pickle
@@ -9,27 +10,16 @@ from indra.statements import stmts_to_json
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
-from indra.belief import BeliefEngine
 from indra.databases import hgnc_client
 from indra.sources.indra_db_rest import get_statements
-from indra_db.client.statements import get_statements_by_gene_role_type
+from indra_db.client.principal.curation import get_curations
 
 
 logger = logging.getLogger('get_kinase_interactions')
 
 
-def get_statements_for_kinase_db_direct(kinase):
-    logger.info('Getting statements for %s' % kinase)
-    hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
-    if hgnc_id is None:
-        logger.warning('Could not get HGNC ID for %s' % kinase)
-        return None
-    stmts = get_statements_by_gene_role_type(agent_id=hgnc_id,
-                                             agent_ns='HGNC',
-                                             with_support=False)
-    stmts = filter_out_medscan(stmts)
-    stmts = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
-    return stmts
+iupac_to_chebi_dict = pickle.load(open('iupac_to_chebi_dict.p', 'rb'))
+chebi_to_selleck_dict = pickle.load(open('chebi_to_selleck_dict', 'rb'))
 
 
 def get_statements_for_kinase_db_api(kinase):
@@ -45,22 +35,6 @@ def get_statements_for_kinase_db_api(kinase):
     return stmts
 
 
-def get_kinase_statements(kinases, db_mode='api'):
-    """Get all statements from the database for a list of gene symbols."""
-    all_statements = {}
-    for kinase in kinases:
-        if db_mode == 'direct':
-            stmts = get_statements_for_kinase_db_direct(kinase)
-        elif db_mode == 'api':
-            stmts = get_statements_for_kinase_db_api(kinase)
-        else:
-            raise ValueError('Invalid DB mode: %s' % db_mode)
-        if stmts is None:
-            continue
-        all_statements[kinase] = stmts
-    return all_statements
-
-
 def filter_out_medscan(stmts):
     logger.info('Starting medscan filter with %d statements' % len(stmts))
     new_stmts = []
@@ -70,6 +44,7 @@ def filter_out_medscan(stmts):
             if ev.source_api == 'medscan':
                 continue
             new_evidence.append(ev)
+        stmt.evidence = new_evidence
         if new_evidence:
             new_stmts.append(stmt)
     logger.info('Finished medscan filter with %d statements' % len(new_stmts))
@@ -145,27 +120,55 @@ def get_kinase_list(fname, col_name):
     return kinases
 
 
-def assemble_statements(stmts):
+def rename_chemical(agent):
+    from indra.ontology.bio import bio_ontology
+    if agent.db_refs['CHEBI'] in chebi_to_selleck_dict:
+        selleckname = chebi_to_selleck_dict[agent.db_refs['CHEBI']]
+        if selleckname:
+            agent.name = selleckname
+            return
+    for db_ns, db_id in sorted(agent.db_refs.items()):
+        if db_ns in {'TEXT', 'TEXT_NORM', 'CHEBI'}:
+            continue
+        name = bio_ontology.get_name(db_ns, db_id)
+        if name:
+            agent.name = name
+            return
+
+
+def assemble_statements(stmts, curs):
     """Run assembly steps on statements."""
-    be = BeliefEngine()
-    for kinase, kinase_stmts in stmts.items():
-        stmts[kinase] = ac.filter_human_only(kinase_stmts)
-        be.set_prior_probs(stmts[kinase])
+    stmts = ac.filter_human_only(stmts)
+    stmts = ac.filter_by_curation(stmts, curations=curs)
+    # Rename chemicals
+    for stmt in stmts:
+        for agent in stmt.real_agent_list():
+            if agent.db_refs.get('CHEBI') and \
+                   len(agent.name) > 25:
+                rename_chemical(agent)
+    # Remove long names
+    stmts = [stmt for stmt in stmts if
+             all(len(a.name) < 20 for a in stmt.real_agent_list())]
+    # Remove microRNAs
+    stmts = [stmt for stmt in stmts
+             if not any('miR' in a.name for a in stmt.real_agent_list())]
+    # Remove unary statements and ones with many agents
+    stmts = [stmt for stmt in stmts
+             if (1 < len(stmt.real_agent_list()) < 4)]
     return stmts
 
 
-def dump_html_to_s3(stmts):
+def dump_html_to_s3(kinase, stmts):
     s3 = boto3.client('s3')
     bucket = 'dark-kinases'
-    for kinase, sts in stmts.items():
-        fname = f'{kinase}.html'
-        sts_sorted = sorted(sts, key=lambda x: len(x.evidence), reverse=True)
-        ha = HtmlAssembler(sts_sorted)
-        html_str = ha.make_model()
-        url = 'https://s3.amazonaws.com/%s/%s' % (bucket, fname)
-        print('Dumping to %s' % url)
-        s3.put_object(Key=fname, Body=html_str.encode('utf-8'), Bucket=bucket,
-                      ContentType='text/html')
+    fname = f'{kinase}.html'
+    sts_sorted = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
+    ha = HtmlAssembler(sts_sorted, db_rest_url='https://db.indra.bio')
+    html_str = ha.make_model()
+    url = 'https://s3.amazonaws.com/%s/%s' % (bucket, fname)
+    print('Dumping to %s' % url)
+    s3.put_object(Key=fname, Body=html_str.encode('utf-8'), Bucket=bucket,
+                  ContentType='text/html')
 
 
 if __name__ == '__main__':
@@ -178,9 +181,9 @@ if __name__ == '__main__':
     # Get all kinase Statements
     # There are 722 kinases but only 709 unique here
     fname = 'allsources_HMS_it3_cleaned_manual.csv'
-    prefix = 'all_kinase_statements_v7'
-    col_name = 'HGNC_name'
-    db_mode = 'api'
-    kinases = get_kinase_list(fname, col_name)
-    stmts = make_all_kinase_statements(kinases, prefix, db_mode=db_mode,
-                                       exports={'s3'})
+    kinases = get_kinase_list(fname, 'HGNC_name')
+    curs = get_curations()
+    for kinase in tqdm.tqdm(kinases[(kinases.index('JAK2')-1):]):
+        stmts = get_statements_for_kinase_db_api(kinase)
+        stmts = assemble_statements(stmts, curs)
+        dump_html_to_s3(kinase, stmts)
