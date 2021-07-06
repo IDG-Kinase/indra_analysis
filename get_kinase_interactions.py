@@ -6,7 +6,8 @@ import boto3
 import pickle
 import pandas
 import logging
-from indra.statements import stmts_to_json
+from collections import defaultdict
+from indra.statements import stmts_to_json, Inhibition, Activation
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
@@ -18,8 +19,8 @@ from indra_db.client.principal.curation import get_curations
 logger = logging.getLogger('get_kinase_interactions')
 
 
-iupac_to_chebi_dict = pickle.load(open('iupac_to_chebi_dict.p', 'rb'))
-chebi_to_selleck_dict = pickle.load(open('chebi_to_selleck_dict', 'rb'))
+iupac_to_chebi_dict = pickle.load(open('data/iupac_to_chebi_dict.p', 'rb'))
+chebi_to_selleck_dict = pickle.load(open('data/chebi_to_selleck_dict', 'rb'))
 
 
 def get_statements_for_kinase_db_api(kinase):
@@ -136,10 +137,36 @@ def rename_chemical(agent):
             return
 
 
+def remove_contradictions(stmts):
+    logger.info('Filtering contradictions on %d statements' % len(stmts))
+    stmts_by_agents = defaultdict(list)
+    for stmt in stmts:
+        if not len(stmt.real_agent_list()) == 2:
+            continue
+        stmts_by_agents[tuple(agent.name
+                             for agent in stmt.real_agent_list())].append(stmt)
+    to_remove = set()
+    for agent_names, stmts_for_agents in stmts_by_agents.items():
+        stmt_types = {type(stmt): len(stmt.evidence)
+                      for stmt in stmts_for_agents}
+        if {Inhibition, Activation} <= set(stmt_types):
+            if stmt_types[Inhibition] < stmt_types[Activation]:
+                to_remove |= {stmt.get_hash() for stmt in stmts_for_agents
+                              if isinstance(stmt, Inhibition)}
+            elif stmt_types[Activation] < stmt_types[Inhibition]:
+                to_remove |= {stmt.get_hash() for stmt in stmts_for_agents
+                              if isinstance(stmt, Activation)}
+    stmts = [s for s in stmts if s.get_hash() not in to_remove]
+    logger.info('Finishing with %d statements' % len(stmts))
+    return stmts
+
+
 def assemble_statements(stmts, curs):
     """Run assembly steps on statements."""
+    stmts = ac.filter_grounded_only(stmts)
     stmts = ac.filter_human_only(stmts)
     stmts = ac.filter_by_curation(stmts, curations=curs)
+    stmts = remove_contradictions(stmts)
     # Rename chemicals
     for stmt in stmts:
         for agent in stmt.real_agent_list():
@@ -164,7 +191,7 @@ def dump_html_to_s3(kinase, stmts):
     fname = f'{kinase}.html'
     sts_sorted = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
     ha = HtmlAssembler(sts_sorted, db_rest_url='https://db.indra.bio')
-    html_str = ha.make_model()
+    html_str = ha.make_model(no_redundancy=True)
     url = 'https://s3.amazonaws.com/%s/%s' % (bucket, fname)
     print('Dumping to %s' % url)
     s3.put_object(Key=fname, Body=html_str.encode('utf-8'), Bucket=bucket,
@@ -180,10 +207,14 @@ if __name__ == '__main__':
 
     # Get all kinase Statements
     # There are 722 kinases but only 709 unique here
-    fname = 'allsources_HMS_it3_cleaned_manual.csv'
+    fname = 'data/allsources_HMS_it3_cleaned_manual.csv'
     kinases = get_kinase_list(fname, 'HGNC_name')
     curs = get_curations()
-    for kinase in tqdm.tqdm(kinases[(kinases.index('JAK2')-1):]):
+    all_stmts = {}
+    for kinase in tqdm.tqdm(kinases):
         stmts = get_statements_for_kinase_db_api(kinase)
         stmts = assemble_statements(stmts, curs)
         dump_html_to_s3(kinase, stmts)
+        all_stmts[kinase] = stmts
+    with open('data/all_stmts.pkl', 'wb') as fh:
+        pickle.dump(all_stmts, fh)
