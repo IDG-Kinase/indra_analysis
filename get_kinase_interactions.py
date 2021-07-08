@@ -206,6 +206,19 @@ def dump_html_to_s3(kinase, stmts):
                   ContentType='text/html')
 
 
+def load_raw_stmts(kinase):
+    fname = os.path.join('data', f'{kinase}.pkl')
+    if os.path.exists(fname):
+        logger.info('Loading cached %s' % fname)
+        with open(fname, 'rb') as fh:
+            stmts = pickle.load(fh)
+    else:
+        stmts = get_statements_for_kinase_db_api(kinase)
+        with open(fname, 'wb') as fh:
+            pickle.dump(stmts, fh)
+    return stmts
+
+
 if __name__ == '__main__':
     # Get all dark kinase Statements
     #fname = 'Table_005_IDG_dark_kinome.csv'
@@ -220,7 +233,7 @@ if __name__ == '__main__':
     curs = get_curations()
     all_stmts = {}
     for kinase in tqdm.tqdm(kinases):
-        stmts = get_statements_for_kinase_db_api(kinase)
+        stmts = load_raw_stmts(kinase)
         stmts = assemble_statements(stmts, curs)
         dump_html_to_s3(kinase, stmts)
         all_stmts[kinase] = stmts
