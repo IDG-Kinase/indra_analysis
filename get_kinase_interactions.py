@@ -7,7 +7,8 @@ import pickle
 import pandas
 import logging
 from collections import defaultdict
-from indra.statements import stmts_to_json, Inhibition, Activation
+from indra.statements import stmts_to_json, Inhibition, Activation, \
+    IncreaseAmount, DecreaseAmount, Phosphorylation, Dephosphorylation
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
@@ -144,18 +145,25 @@ def remove_contradictions(stmts):
         if not len(stmt.real_agent_list()) == 2:
             continue
         stmts_by_agents[tuple(agent.name
-                             for agent in stmt.real_agent_list())].append(stmt)
+                              for agent in stmt.real_agent_list())].append(stmt)
     to_remove = set()
+    contradiction_pairs = [
+        (Activation, Inhibition),
+        (IncreaseAmount, DecreaseAmount),
+        (Phosphorylation, Dephosphorylation),
+    ]
     for agent_names, stmts_for_agents in stmts_by_agents.items():
-        stmt_types = {type(stmt): len(stmt.evidence)
-                      for stmt in stmts_for_agents}
-        if {Inhibition, Activation} <= set(stmt_types):
-            if stmt_types[Inhibition] < stmt_types[Activation]:
-                to_remove |= {stmt.get_hash() for stmt in stmts_for_agents
-                              if isinstance(stmt, Inhibition)}
-            elif stmt_types[Activation] < stmt_types[Inhibition]:
-                to_remove |= {stmt.get_hash() for stmt in stmts_for_agents
-                              if isinstance(stmt, Activation)}
+        stmt_types = defaultdict(int)
+        for stmt in stmts_for_agents:
+            stmt_types[type(stmt)] += len(stmt.evidence)
+        for stmt_type1, stmt_type2 in contradiction_pairs:
+            if {stmt_type1, stmt_type2} <= set(stmt_types):
+                if stmt_types[stmt_type1] < stmt_types[stmt_type2]:
+                    to_remove |= {stmt.get_hash() for stmt in stmts_for_agents
+                                  if isinstance(stmt, stmt_type1)}
+                elif stmt_types[stmt_type2] < stmt_types[stmt_type1]:
+                    to_remove |= {stmt.get_hash() for stmt in stmts_for_agents
+                                  if isinstance(stmt, stmt_type2)}
     stmts = [s for s in stmts if s.get_hash() not in to_remove]
     logger.info('Finishing with %d statements' % len(stmts))
     return stmts
