@@ -15,6 +15,7 @@ from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
 from indra.databases import hgnc_client
+from indra.databases.identifiers import ensure_prefix_if_needed
 from indra.sources.indra_db_rest import get_statements
 from indra_db.client.principal.curation import get_curations
 
@@ -176,33 +177,48 @@ def assemble_statements(stmts, curs):
     # Remove unary statements and ones with many agents
     stmts = [stmt for stmt in stmts
              if (1 < len(stmt.real_agent_list()) < 4)]
+    stmts = fix_invalidities(stmts)
     stmts = ac.filter_grounded_only(stmts)
     stmts = ac.filter_human_only(stmts)
     stmts = ac.filter_by_curation(stmts, curations=curs)
     stmts = unify_lspci(stmts)
     stmts = remove_contradictions(stmts)
     # Rename chemicals
+    logger.info('Renaming chemicals')
     for stmt in stmts:
         for agent in stmt.real_agent_list():
             if agent.db_refs.get('CHEBI') and len(agent.name) > 25:
                 rename_chemical(agent)
     # Remove long names
+    logger.info('Removing statements with long names')
     stmts = [stmt for stmt in stmts if
              all(len(a.name) < 20 for a in stmt.real_agent_list())]
+    logger.info('%d statements remaining' % len(stmts))
     # Remove microRNAs
+    logger.info('Removing microRNA statements')
     stmts = [stmt for stmt in stmts
              if not any('miR' in a.name for a in stmt.real_agent_list())]
+    logger.info('%d statements remaining' % len(stmts))
+    return stmts
+
+
+def fix_invalidities(stmts):
+    for stmt in stmts:
+        for agent in stmt.real_agent_list():
+            for db_ns, db_id in agent.db_refs.items():
+                agent.db_refs[db_ns] = ensure_prefix_if_needed(db_ns, db_id)
     return stmts
 
 
 def unify_lspci(stmts):
+    from indra.statements.agent import default_ns_order
+    from indra.preassembler import Preassembler
+    from indra.ontology.bio import bio_ontology
     logger.info('Unifying by LSPCI with %d statements' % len(stmts))
     orig_ns_order = indra.statements.agent.default_ns_order[:]
     indra.statements.agent.default_ns_order = ['LSPCI'] + \
         indra.statements.agent.default_ns_order
-    from indra.ontology.bio import bio_ontology
     agents_by_lspci = defaultdict(list)
-    from indra.statements.agent import default_ns_order
     ns_order = default_ns_order + ['CHEMBL', 'DRUGBANK', 'HMS-LINCS', 'CAS']
     for stmt in stmts:
         for agent in stmt.real_agent_list():
@@ -227,9 +243,7 @@ def unify_lspci(stmts):
             agent.db_refs['LSPCI'] = lspci
             agent.name = standard_name
 
-    from indra.preassembler import Preassembler
-    pa = Preassembler(bio_ontology, stmts)
-    unique_stmts = pa.combine_duplicates()
+    unique_stmts = ac.run_preassembly(stmts, run_refinement=False)
     indra.statements.agent.default_ns_order = orig_ns_order
     logger.info('Finished unification with %d statements' % len(unique_stmts))
     return unique_stmts
@@ -241,7 +255,7 @@ def dump_html_to_s3(kinase, stmts):
     fname = f'{kinase}.html'
     sts_sorted = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
     ha = HtmlAssembler(sts_sorted, db_rest_url='https://db.indra.bio')
-    html_str = ha.make_model(no_redundancy=True)
+    html_str = ha.make_model(no_redundancy=True, show_belief=True)
     url = 'https://s3.amazonaws.com/%s/%s' % (bucket, fname)
     print('Dumping to %s' % url)
     s3.put_object(Key=fname, Body=html_str.encode('utf-8'), Bucket=bucket,
