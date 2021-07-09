@@ -337,7 +337,20 @@ def add_source_urls(stmts):
                     ('https://www.grnpedia.org/trrust/result_tonly.php?gene=%s'
                      '&species=human') % target.name
             elif ev.source_api == 'biopax':
-                ev.annotations['source_id'] = ev.source_id
+                if not ev.source_id:
+                    continue
+                elif 'phosphotite' in ev.source_id:
+                    ev.annotations['source_url'] = 'https://www.phosphosite.org/'
+                else:
+                    ev.annotations['source_url'] = ev.source_id
+            elif ev.source_api == 'tas':
+                lspcid = stmt.subj.db_refs.get('LSPCI')
+                if lspcid:
+                    url = ('https://labsyspharm.shinyapps.io/smallmoleculesuite/'
+                          '?_inputs_&binding-table-selectivity_nav=%%22tas%%22&'
+                          'binding-query-select_compound=%%22%s-1%%22&'
+                          'tab=%%22binding%%22') % lspcid
+                    ev.annotations['source_url'] = url
     return stmts
 
 
