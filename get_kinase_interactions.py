@@ -27,6 +27,19 @@ iupac_to_chebi_dict = pickle.load(open('data/iupac_to_chebi_dict.p', 'rb'))
 chebi_to_selleck_dict = pickle.load(open('data/chebi_to_selleck_dict', 'rb'))
 
 
+def load_ctd_stmts():
+    logger.info('Loading CTD statements')
+    with open('data/ctd_chemical_gene_new_assembled.pkl', 'rb') as fh:
+        ctd_stmts = pickle.load(fh)
+    ctd_stmts_by_gene = defaultdict(list)
+    for stmt in ctd_stmts:
+        ctd_stmts_by_gene[stmt.agent_list()[1].name].append(stmt)
+    return ctd_stmts_by_gene
+
+
+ctd_stmts_by_gene = load_ctd_stmts()
+
+
 def get_statements_for_kinase_db_api(kinase):
     logger.info('Getting statements for %s' % kinase)
     hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
@@ -172,11 +185,12 @@ def remove_contradictions(stmts):
     return stmts
 
 
-def assemble_statements(stmts, curs):
+def assemble_statements(kinase, stmts, curs):
     """Run assembly steps on statements."""
     # Remove unary statements and ones with many agents
     stmts = [stmt for stmt in stmts
              if (1 < len(stmt.real_agent_list()) < 4)]
+    stmts = replace_ctd(stmts, ctd_stmts_by_gene.get(kinase, []))
     stmts = fix_invalidities(stmts)
     stmts = ac.filter_grounded_only(stmts)
     stmts = ac.filter_human_only(stmts)
@@ -249,6 +263,28 @@ def unify_lspci(stmts):
     return unique_stmts
 
 
+def replace_ctd(stmts, ctd_stmts_for_kinase):
+    ctd_stmts_by_hash = {stmt.get_hash(): stmt
+                         for stmt in ctd_stmts_for_kinase}
+    ev_extended = set()
+    new_stmts = []
+    for stmt in stmts:
+        sh = stmt.get_hash()
+        stmt.evidence = [ev for ev in stmt.evidence
+                         if ev.source_api != 'ctd']
+        new_ctd_stmt = ctd_stmts_by_hash.get(sh)
+        if new_ctd_stmt:
+            ev_extended.add(sh)
+            stmt.evidence += new_ctd_stmt.evidence
+        if not stmt.evidence:
+            continue
+        new_stmts.append(stmt)
+    for sh, stmt in ctd_stmts_by_hash.items():
+        if sh not in ev_extended:
+            new_stmts.append(stmt)
+    return new_stmts
+
+
 def dump_html_to_s3(kinase, stmts):
     s3 = boto3.client('s3')
     bucket = 'dark-kinases'
@@ -290,7 +326,7 @@ if __name__ == '__main__':
     all_stmts = {}
     for kinase in tqdm.tqdm(kinases):
         stmts = load_raw_stmts(kinase)
-        stmts = assemble_statements(stmts, curs)
+        stmts = assemble_statements(kinase, stmts, curs)
         dump_html_to_s3(kinase, stmts)
         all_stmts[kinase] = stmts
     with open('data/all_stmts.pkl', 'wb') as fh:
