@@ -1,6 +1,7 @@
 import os
 import json
 import tqdm
+import types
 import numpy
 import boto3
 import pickle
@@ -9,6 +10,7 @@ import logging
 from collections import defaultdict
 from indra.statements import stmts_to_json, Inhibition, Activation, \
     IncreaseAmount, DecreaseAmount, Phosphorylation, Dephosphorylation
+import indra.statements.agent
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
@@ -171,15 +173,18 @@ def remove_contradictions(stmts):
 
 def assemble_statements(stmts, curs):
     """Run assembly steps on statements."""
+    # Remove unary statements and ones with many agents
+    stmts = [stmt for stmt in stmts
+             if (1 < len(stmt.real_agent_list()) < 4)]
     stmts = ac.filter_grounded_only(stmts)
     stmts = ac.filter_human_only(stmts)
     stmts = ac.filter_by_curation(stmts, curations=curs)
+    stmts = unify_lspci(stmts)
     stmts = remove_contradictions(stmts)
     # Rename chemicals
     for stmt in stmts:
         for agent in stmt.real_agent_list():
-            if agent.db_refs.get('CHEBI') and \
-                   len(agent.name) > 25:
+            if agent.db_refs.get('CHEBI') and len(agent.name) > 25:
                 rename_chemical(agent)
     # Remove long names
     stmts = [stmt for stmt in stmts if
@@ -187,10 +192,47 @@ def assemble_statements(stmts, curs):
     # Remove microRNAs
     stmts = [stmt for stmt in stmts
              if not any('miR' in a.name for a in stmt.real_agent_list())]
-    # Remove unary statements and ones with many agents
-    stmts = [stmt for stmt in stmts
-             if (1 < len(stmt.real_agent_list()) < 4)]
     return stmts
+
+
+def unify_lspci(stmts):
+    logger.info('Unifying by LSPCI with %d statements' % len(stmts))
+    orig_ns_order = indra.statements.agent.default_ns_order[:]
+    indra.statements.agent.default_ns_order = ['LSPCI'] + \
+        indra.statements.agent.default_ns_order
+    from indra.ontology.bio import bio_ontology
+    agents_by_lspci = defaultdict(list)
+    from indra.statements.agent import default_ns_order
+    ns_order = default_ns_order + ['CHEMBL', 'DRUGBANK', 'HMS-LINCS', 'CAS']
+    for stmt in stmts:
+        for agent in stmt.real_agent_list():
+            if 'LSPCI' in agent.db_refs:
+                agents_by_lspci[agent.db_refs['LSPCI']].append(agent)
+            else:
+                agent_gr = agent.get_grounding(ns_order=ns_order)
+                if agent_gr[0] is None:
+                    continue
+                else:
+                    parents = bio_ontology.get_parents(*agent_gr)
+                    lspci_parents = [p[1] for p in parents if p[0] == 'LSPCI']
+                    if len(lspci_parents) != 1:
+                        continue
+                    lspci_parent = lspci_parents[0]
+                    agents_by_lspci[lspci_parent].append(agent)
+
+    for lspci, agents in agents_by_lspci.items():
+        lspci_name = bio_ontology.get_name('LSPCI', lspci)
+        standard_name = lspci_name if lspci_name else agents[0].name
+        for agent in agents:
+            agent.db_refs['LSPCI'] = lspci
+            agent.name = standard_name
+
+    from indra.preassembler import Preassembler
+    pa = Preassembler(bio_ontology, stmts)
+    unique_stmts = pa.combine_duplicates()
+    indra.statements.agent.default_ns_order = orig_ns_order
+    logger.info('Finished unification with %d statements' % len(unique_stmts))
+    return unique_stmts
 
 
 def dump_html_to_s3(kinase, stmts):
