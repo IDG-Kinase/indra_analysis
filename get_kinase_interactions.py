@@ -11,6 +11,7 @@ from collections import defaultdict
 from indra.statements import stmts_to_json, Inhibition, Activation, \
     IncreaseAmount, DecreaseAmount, Phosphorylation, Dephosphorylation
 import indra.statements.agent
+from indra.databases import uniprot_client
 from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
 from indra.tools import assemble_corpus as ac
@@ -31,10 +32,7 @@ def load_ctd_stmts():
     logger.info('Loading CTD statements')
     with open('data/ctd_chemical_gene_new_assembled.pkl', 'rb') as fh:
         ctd_stmts = pickle.load(fh)
-    ctd_stmts_by_gene = defaultdict(list)
-    for stmt in ctd_stmts:
-        ctd_stmts_by_gene[stmt.agent_list()[1].name].append(stmt)
-    return ctd_stmts_by_gene
+    return ctd_stmts
 
 
 ctd_stmts_by_gene = load_ctd_stmts()
@@ -213,6 +211,7 @@ def assemble_statements(kinase, stmts, curs):
     stmts = [stmt for stmt in stmts
              if not any('miR' in a.name for a in stmt.real_agent_list())]
     logger.info('%d statements remaining' % len(stmts))
+    stmts = add_source_urls(stmts)
     return stmts
 
 
@@ -283,6 +282,63 @@ def replace_ctd(stmts, ctd_stmts_for_kinase):
         if sh not in ev_extended:
             new_stmts.append(stmt)
     return new_stmts
+
+
+def add_source_urls(stmts):
+    for stmt in stmts:
+        for ev in stmt.evidence:
+            if ev.source_api == 'hprd':
+                if ev.source_id and ev.source_id.startswith('http'):
+                    ev.annotations['source_url'] = ev.source_id
+            elif ev.source_api == 'signor':
+                # Not clear how to use the source_id like SIGNOR-252627 to
+                # link directly to the reaction
+                up_id = stmt.real_agent_list()[0].db_refs.get('UP')
+                if up_id:
+                    ev.annotations['source_url'] = \
+                        ('https://signor.uniroma2.it/relation_result.php?'
+                         'id=%s' % up_id)
+            elif ev.source_api == 'ctd':
+                agent = stmt.real_agent_list()[0]
+                egid = agent.db_refs.get('EGID')
+                meshid = agent.db_refs.get('MESH')
+                if egid:
+                    ev.annotations['source_url'] = \
+                        'http://ctdbase.org/detail.go?type=gene&acc=%s' % egid
+                elif meshid:
+                    ev.annotations['source_url'] = \
+                        'http://ctdbase.org/detail.go?type=chem&acc=%s' % meshid
+            elif ev.source_api == 'biogrid':
+                ev.annotations['source_url'] = \
+                    'https://thebiogrid.org/interaction/%s' % ev.source_id
+            elif ev.source_api == 'phosphoelm':
+                ev.annotations['source_url'] = \
+                    'http://phospho.elm.eu.org/byKinase/%s.html' % \
+                    ev.annotations['phosphoelm_kinase_name']
+            elif ev.source_api == 'virhostnet':
+                agent = stmt.real_agent_list()[0]
+                upid = agent.db_refs.get('UP')
+                if upid:
+                    mnemonic = \
+                        uniprot_client.get_mnemonic(upid, web_fallback=False)
+                    if mnemonic:
+                        ev.annotations['source_url'] = \
+                            ('https://virhostnet.prabi.fr/pathostscape3.html'
+                             '?protein=%s' % mnemonic)
+            elif ev.source_api == 'drugbank':
+                agent = stmt.real_agent_list()[0]
+                dbid = agent.db_refs.get('DRUGBANK')
+                if dbid:
+                    ev.annotations['source_url'] = \
+                        'https://go.drugbank.com/drugs/%s' % dbid
+            elif ev.source_api == 'trrust':
+                target = stmt.obj
+                ev.annotations['source_url'] = \
+                    ('https://www.grnpedia.org/trrust/result_tonly.php?gene=%s'
+                     '&species=human') % target.name
+            elif ev.source_api == 'biopax':
+                ev.annotations['source_id'] = ev.source_id
+    return stmts
 
 
 def dump_html_to_s3(kinase, stmts):
