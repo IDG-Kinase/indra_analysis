@@ -8,16 +8,19 @@ import pickle
 import pandas
 import logging
 from collections import defaultdict
-from indra.statements import stmts_to_json, Inhibition, Activation, \
+from indra.statements import stmts_to_json_file, Inhibition, Activation, \
     IncreaseAmount, DecreaseAmount, Phosphorylation, Dephosphorylation
 import indra.statements.agent
 from indra.databases import uniprot_client
-from indra.assemblers.tsv import TsvAssembler
 from indra.assemblers.html import HtmlAssembler
+from indra.assemblers.indranet import IndraNetAssembler
 from indra.tools import assemble_corpus as ac
 from indra.databases import hgnc_client
 from indra.databases.identifiers import ensure_prefix_if_needed
 from indra.sources.indra_db_rest import get_statements
+from indra.databases import ndex_client
+from indra.assemblers.cx import CxAssembler
+from indra.assemblers.cx.hub_layout import add_semantic_hub_layout
 from indra_db.client.principal.curation import get_curations
 
 
@@ -69,23 +72,14 @@ def filter_out_medscan(stmts):
 
 def export_tsv(statements, fname):
     """Export statements into TSV."""
-    def get_stmt_list(statements):
-        stmt_list = []
-        for kinase, stmts in sorted(statements.items(), key=lambda x: x[0]):
-            stmt_list += stmts
-        return stmt_list
-    ta = TsvAssembler(get_stmt_list(statements))
-    ta.make_model(fname)
+    ia = IndraNetAssembler(statements)
+    df = ia.make_df()
+    df.to_csv(fname, index=False, sep='\t')
 
 
 def export_json(statements, fname):
     """Export statements into JSON."""
-    stmts_json = {}
-    for kinase, stmts in sorted(statements.items(), key=lambda x: x[0]):
-        sj = stmts_to_json(stmts)
-        stmts_json[kinase] = sj
-    with open(fname, 'w') as fh:
-        json.dump(stmts_json, fh, indent=1)
+    stmts_to_json_file(statements, fname)
 
 
 def print_statistics(statements):
@@ -96,38 +90,6 @@ def print_statistics(statements):
     print(f'No statements for kinases: {", ".join(missing)}')
     print(f'{counts[0][1]} statements for the top kinase {counts[0][0]}')
     print(f'{numpy.mean(raw_counts)} statements on average per kinase')
-
-
-def make_all_kinase_statements(kinases, prefix, db_mode, exports=None):
-    before_assembly_pickle = f'{prefix}_before_assembly.pkl'
-    after_assembly_pickle = f'{prefix}.pkl'
-    if os.path.exists(after_assembly_pickle):
-        with open(after_assembly_pickle, 'rb') as fh:
-            stmts = pickle.load(fh)
-    else:
-        if os.path.exists(before_assembly_pickle):
-            with open(before_assembly_pickle, 'rb') as fh:
-                stmts = pickle.load(fh)
-        else:
-            # Get all statements for kinases
-            stmts = get_kinase_statements(kinases, db_mode=db_mode)
-            with open(before_assembly_pickle, 'wb') as fh:
-                pickle.dump(stmts, fh)
-        stmts = assemble_statements(stmts)
-        with open(after_assembly_pickle, 'wb') as fh:
-            pickle.dump(stmts, fh)
-
-    # Export into JSON and TSV
-    exports = exports if exports else set()
-    if 'json' in exports:
-        export_json(stmts, f'{prefix}.json')
-    if 'tsv' in exports:
-        export_tsv(stmts, f'{prefix}.tsv')
-    if 's3' in exports:
-        dump_html_to_s3(stmts)
-
-    print_statistics(stmts)
-    return stmts
 
 
 def get_kinase_list(fname, col_name):
@@ -367,8 +329,21 @@ def dump_html_to_s3(kinase, stmts):
                   ContentType='text/html')
 
 
+def upload_ndex_network(kinase, stmts):
+    network_set_id = '9d9d4f66-e3da-11eb-b666-0ac135e8bacf'
+    name = '%s INDRA network' % kinase
+    cxa = CxAssembler(stmts, name)
+    cxa.make_model()
+    add_semantic_hub_layout(cxa.cx, kinase)
+    network_id = cxa.upload_model(private=False)
+    # Style setting already done as part of upload
+    # ndex_client.set_style(network_id)
+    ndex_client.add_to_network_set(network_id, network_set_id)
+    return network_id
+
+
 def load_raw_stmts(kinase):
-    fname = os.path.join('data', f'{kinase}.pkl')
+    fname = os.path.join('data', 'raw', f'{kinase}.pkl')
     if os.path.exists(fname):
         logger.info('Loading cached %s' % fname)
         with open(fname, 'rb') as fh:
@@ -393,10 +368,13 @@ if __name__ == '__main__':
     kinases = get_kinase_list(fname, 'HGNC_name')
     curs = get_curations()
     all_stmts = {}
-    for kinase in tqdm.tqdm(kinases):
+    for kinase in tqdm.tqdm(kinases[kinases.index('AKT2'):]):
         stmts = load_raw_stmts(kinase)
         stmts = assemble_statements(kinase, stmts, curs)
-        dump_html_to_s3(kinase, stmts)
+        upload_ndex_network(kinase, stmts)
+        #dump_html_to_s3(kinase, stmts)
+        #export_tsv(stmts, 'data/assembled/%s.tsv' % kinase)
+        #export_json(stmts, 'data/assembled/%s.json' % kinase)
         all_stmts[kinase] = stmts
-    with open('data/all_stmts.pkl', 'wb') as fh:
-        pickle.dump(all_stmts, fh)
+    #with open('data/assembled/all_stmts.pkl', 'wb') as fh:
+    #    pickle.dump(all_stmts, fh)
