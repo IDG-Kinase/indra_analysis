@@ -339,7 +339,7 @@ def add_source_urls(stmts):
             elif ev.source_api == 'biopax':
                 if not ev.source_id:
                     continue
-                elif 'phosphotite' in ev.source_id:
+                elif 'phosphosite' in ev.source_id:
                     ev.annotations['source_url'] = 'https://www.phosphosite.org/'
                 else:
                     ev.annotations['source_url'] = ev.source_id
