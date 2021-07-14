@@ -151,6 +151,11 @@ def assemble_statements(kinase, stmts, curs):
     stmts = [stmt for stmt in stmts
              if (1 < len(stmt.real_agent_list()) < 4)]
     stmts = replace_ctd(stmts, ctd_stmts_by_gene.get(kinase, []))
+    # We do this at this point to make sure we capture the original DB
+    # hashes before modifying statements to allow lookup
+    for stmt in stmts:
+        for ev in stmt.evidence:
+            ev.annotations['prior_hash'] = stmt.get_hash()
     stmts = fix_invalidities(stmts)
     stmts = ac.filter_grounded_only(stmts)
     stmts = ac.filter_human_only(stmts)
@@ -174,6 +179,8 @@ def assemble_statements(kinase, stmts, curs):
              if not any('miR' in a.name for a in stmt.real_agent_list())]
     logger.info('%d statements remaining' % len(stmts))
     stmts = add_source_urls(stmts)
+    with open('data/assembled/%s.pkl' % kinase, 'wb') as fh:
+        pickle.dump(stmts, fh)
     return stmts
 
 
@@ -187,7 +194,6 @@ def fix_invalidities(stmts):
 
 def unify_lspci(stmts):
     from indra.statements.agent import default_ns_order
-    from indra.preassembler import Preassembler
     from indra.ontology.bio import bio_ontology
     logger.info('Unifying by LSPCI with %d statements' % len(stmts))
     orig_ns_order = indra.statements.agent.default_ns_order[:]
@@ -355,6 +361,29 @@ def load_raw_stmts(kinase):
     return stmts
 
 
+def get_hash_mappings(stmts):
+    hash_mappings = {}
+    for stmt in stmts:
+        current_hash = stmt.get_hash()
+        old_hashes = sorted({ev.annotations['prior_hash']
+                             for ev in stmt.evidence})
+        if len(old_hashes) == 1 and old_hashes[0] == current_hash:
+            continue
+        hash_mappings[str(current_hash)] = old_hashes
+    return hash_mappings
+
+
+def export_joint_tsv(all_stmts, fname):
+    all_stmts_by_hash = {}
+    for kinase, stmts in all_stmts.items():
+        for stmt in stmts:
+            all_stmts_by_hash[stmt.get_hash()] = stmt
+    all_stmts_flat = list(all_stmts_by_hash.values())
+    ia = IndraNetAssembler(all_stmts_flat)
+    df = ia.make_df()
+    df.to_csv(fname, index=False, sep='\t')
+
+
 if __name__ == '__main__':
     # Get all dark kinase Statements
     #fname = 'Table_005_IDG_dark_kinome.csv'
@@ -368,13 +397,14 @@ if __name__ == '__main__':
     kinases = get_kinase_list(fname, 'HGNC_name')
     curs = get_curations()
     all_stmts = {}
-    for kinase in tqdm.tqdm(kinases[kinases.index('AKT2'):]):
+    for kinase in tqdm.tqdm(kinases):
         stmts = load_raw_stmts(kinase)
         stmts = assemble_statements(kinase, stmts, curs)
-        upload_ndex_network(kinase, stmts)
+        # upload_ndex_network(kinase, stmts)
         #dump_html_to_s3(kinase, stmts)
         #export_tsv(stmts, 'data/assembled/%s.tsv' % kinase)
         #export_json(stmts, 'data/assembled/%s.json' % kinase)
         all_stmts[kinase] = stmts
-    #with open('data/assembled/all_stmts.pkl', 'wb') as fh:
-    #    pickle.dump(all_stmts, fh)
+    with open('data/assembled/all_stmts.pkl', 'wb') as fh:
+        pickle.dump(all_stmts, fh)
+    export_joint_tsv(all_stmts, 'data/assembled/all_kinase_statements.tsv')
