@@ -1,15 +1,17 @@
 import os
-import json
+import csv
+import gzip
 import tqdm
-import types
 import numpy
 import boto3
 import pickle
 import pandas
 import logging
+import pystow
 from collections import defaultdict
 from indra.statements import stmts_to_json_file, Inhibition, Activation, \
-    IncreaseAmount, DecreaseAmount, Phosphorylation, Dephosphorylation
+    IncreaseAmount, DecreaseAmount, Phosphorylation, Dephosphorylation, \
+    stmt_from_json
 import indra.statements.agent
 from indra.databases import uniprot_client
 from indra.assemblers.html import HtmlAssembler
@@ -17,23 +19,31 @@ from indra.assemblers.indranet import IndraNetAssembler
 from indra.tools import assemble_corpus as ac
 from indra.databases import hgnc_client
 from indra.databases.identifiers import ensure_prefix_if_needed
-from indra.sources.indra_db_rest import get_statements
+from indra.sources.indra_db_rest import get_statements, get_curations
 from indra.databases import ndex_client
 from indra.assemblers.cx import CxAssembler
 from indra.assemblers.cx.hub_layout import add_semantic_hub_layout
-from indra_db.client.principal.curation import get_curations
+from indra_cogex.client.neo4j_client import Neo4jClient
+
+nc = Neo4jClient()
 
 
 logger = logging.getLogger('get_kinase_interactions')
+base_folder = pystow.module('kinase')
+output_folder = base_folder.join('output')
+resource = lambda x: base_folder.join('resources', name=x)
+output = lambda x: base_folder.join('output', name=x)
+assembled = lambda x: base_folder.join('output', 'assembled', name=x)
 
+iupac_to_chebi_dict = pickle.load(open(resource('iupac_to_chebi_dict.pkl'), 'rb'))
+chebi_to_selleck_dict = pickle.load(open(resource('chebi_to_selleck_dict.pkl'), 'rb'))
 
-iupac_to_chebi_dict = pickle.load(open('data/iupac_to_chebi_dict.p', 'rb'))
-chebi_to_selleck_dict = pickle.load(open('data/chebi_to_selleck_dict', 'rb'))
+network_set_id = '98f7840e-0323-11ed-ac45-0ac135e8bacf'
 
 
 def load_ctd_stmts():
     logger.info('Loading CTD statements')
-    with open('data/ctd_chemical_gene_new_assembled.pkl', 'rb') as fh:
+    with open(resource('ctd_chemical_gene_new_assembled.pkl'), 'rb') as fh:
         ctd_stmts = pickle.load(fh)
     return ctd_stmts
 
@@ -52,6 +62,56 @@ def get_statements_for_kinase_db_api(kinase):
     stmts = filter_out_medscan(ip.statements)
     stmts = sorted(stmts, key=lambda x: len(x.evidence), reverse=True)
     return stmts
+
+
+def get_statements_for_kinase_cogex(kinase):
+    logger.info('Getting statements for %s' % kinase)
+    hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
+    if hgnc_id is None:
+        logger.warning('Could not get HGNC ID for %s' % kinase)
+        return None
+    rels = nc.get_all_relations(('HGNC', hgnc_id), 'indra_rel')
+
+
+def get_statements_from_dump(kinases):
+    from indra_cogex.sources.indra_db.raw_export import load_statement_json
+    hgnc_ids = {hgnc_client.get_current_hgnc_id(kinase) for kinase in kinases}
+    hgnc_ids = {h for h in hgnc_ids if h is not None}
+    kinase_stmts = defaultdict(list)
+    stmts_by_hash = {}
+    # First we get unique statements that we can easily filter to ones
+    # containing one of the kinases
+    fname = pystow.join('indra', 'db', name='unique_statements.tsv.gz')
+    with gzip.open(fname, 'rt') as fh:
+        reader = csv.reader(fh, delimiter='\t')
+        for stmt_hash, stmt_json_str in tqdm.tqdm(reader,
+                desc='Loading unique statements', total=9245941):
+            stmt = stmt_from_json(load_statement_json(stmt_json_str))
+            overlap = {a.db_refs['HGNC']
+                       for a in stmt.real_agent_list()
+                       if 'HGNC' in a.db_refs} & hgnc_ids
+            for hgnc_id in overlap:
+                kinase_stmts[hgnc_id].append(stmt)
+                stmts_by_hash[stmt_hash] = stmt
+                stmt.evidence = []
+    # Now we can fill in the statements' beliefs
+    fname = pystow.join('indra', 'db', name='belief_scores.pkl')
+    with open(fname, 'rb') as fh:
+        beliefs = pickle.load(fh)
+    for stmt_hash, stmt in tqdm.tqdm(stmts_by_hash.items(),
+                                     desc='Assigning beliefs'):
+        stmt.belief = beliefs[int(stmt_hash)]
+    # Finally, we iterate over evidences and add them to each statement
+    fname = pystow.join('indra', 'db', name='processed_statements.tsv.gz',)
+    with gzip.open(fname, 'rt') as fh:
+        reader = csv.reader(fh, delimiter='\t')
+        for stmt_hash, stmt_json_str in tqdm.tqdm(reader,
+                                                  desc='Assigning evidences'):
+            if stmt_hash not in stmts_by_hash:
+                continue
+            stmt = stmt_from_json(load_statement_json(stmt_json_str))
+            stmts_by_hash[stmt_hash].evidence.append(stmt.evidence[0])
+    return dict(kinase_stmts)
 
 
 def filter_out_medscan(stmts):
@@ -336,7 +396,6 @@ def dump_html_to_s3(kinase, stmts):
 
 
 def upload_ndex_network(kinase, stmts):
-    network_set_id = '9d9d4f66-e3da-11eb-b666-0ac135e8bacf'
     name = '%s INDRA network' % kinase
     cxa = CxAssembler(stmts, name)
     cxa.make_model()
@@ -393,18 +452,30 @@ if __name__ == '__main__':
 
     # Get all kinase Statements
     # There are 722 kinases but only 709 unique here
-    fname = 'data/allsources_HMS_it3_cleaned_manual.csv'
-    kinases = get_kinase_list(fname, 'HGNC_name')
+    kinases = get_kinase_list(
+        resource('allsources_HMS_it3_cleaned_manual.csv'), 'HGNC_name')
+
+    fname = output('kinase_statements.pkl')
+    if fname.exists():
+        logger.info('Loading kinase statements')
+        with open(fname, 'rb') as fh:
+            all_stmts = pickle.load(fh)
+    else:
+        all_stmts = get_statements_from_dump(kinases)
+        with open(fname, 'wb') as fh:
+            pickle.dump(all_stmts, fh)
+
     curs = get_curations()
-    all_stmts = {}
+    network_registry = {}
     for kinase in tqdm.tqdm(kinases):
-        stmts = load_raw_stmts(kinase)
+        hgnc_id = hgnc_client.get_current_hgnc_id(kinase)
+        if not hgnc_id:
+            continue
+        stmts = all_stmts.get(hgnc_id, [])
         stmts = assemble_statements(kinase, stmts, curs)
-        # upload_ndex_network(kinase, stmts)
+        #network_id = upload_ndex_network(kinase, stmts)
+        #network_registry[kinase] = network_id
         #dump_html_to_s3(kinase, stmts)
-        #export_tsv(stmts, 'data/assembled/%s.tsv' % kinase)
-        #export_json(stmts, 'data/assembled/%s.json' % kinase)
-        all_stmts[kinase] = stmts
-    with open('data/assembled/all_stmts.pkl', 'wb') as fh:
-        pickle.dump(all_stmts, fh)
-    export_joint_tsv(all_stmts, 'data/assembled/all_kinase_statements.tsv')
+        export_tsv(stmts, assembled('%s.tsv' % kinase))
+        export_json(stmts, assembled('%s.json' % kinase))
+    export_joint_tsv(all_stmts, assembled('all_kinase_statements.tsv'))
